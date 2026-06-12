@@ -386,7 +386,7 @@ class EpisodeRecorderNode(LifecycleNode):
         for task in self._contract.tasks or []:
             qos = qos_profile_from_dict(task.qos) or 10
             topics.append((task.topic, task.type, qos, 'no_buffer'))
-
+        self.get_logger().debug(f'Built topics after task specs: {topics}')
         # Adjunct topics (record-only, no key mapping) - these can have buffering strategies
         for adj in self._contract.adjunct or []:
             qos = qos_profile_from_dict(adj.qos) or 10
@@ -400,7 +400,7 @@ class EpisodeRecorderNode(LifecycleNode):
                     buffering_strategy = 'no_buffer'
 
             topics.append((adj.topic, adj.type, qos, buffering_strategy))
-
+        self.get_logger().debug(f'Built topics after adjunct specs: {topics}')
         # If node is running with simulation time enabled, record the /clock
         # topic so playback can drive sim time. Use a safe get in case the
         # parameter wasn't declared by the launcher.
@@ -414,6 +414,7 @@ class EpisodeRecorderNode(LifecycleNode):
             # reasonable default for clock topic traffic.
             topics.append(('/clock', 'rosgraph_msgs/msg/Clock', 10, 'no_buffer'))
 
+        self.get_logger().debug(f'Final topic list to subscribe: {topics}')
         return topics
 
     def _discover_topics(self) -> list[tuple[str, str, QoSProfile | int, str]]:
@@ -443,7 +444,7 @@ class EpisodeRecorderNode(LifecycleNode):
         if discovered:
             names = [t[0] for t in discovered]
             self.get_logger().info(f'Auto-discovered {len(discovered)} topics: {names}')
-
+        print(f"Discovered topics: {discovered}")
         return discovered
 
     def _cleanup_discovered_subs(self) -> None:
@@ -480,6 +481,7 @@ class EpisodeRecorderNode(LifecycleNode):
 
         def callback(msg: Any, _topic: str = topic) -> None:
             timestamp_ns = self.get_clock().now().nanoseconds
+
             # Buffer TRANSIENT_LOCAL messages when not recording (based on strategy)
             if not self._is_recording:
                 # Check if this topic should be buffered
@@ -502,13 +504,18 @@ class EpisodeRecorderNode(LifecycleNode):
                                 # Enforce history depth limit
                                 while len(self._buffers[_topic]) > history_depth:
                                     self._buffers[_topic].popleft()
-                    except Exception:
-                        pass  # Best-effort buffering
+                    except Exception as e:
+                        self.get_logger().error(
+                            f'Buffering failed on {_topic}: type={type_str}, error={e}'
+                        )
                 return
 
             # Write live message to bag
             with self._writer_lock:
                 if self._writer is None:
+                    self.get_logger().warning(
+                        f'Received {_topic} while writer unavailable; message dropped'
+                    )
                     return
                 try:
                     # Use receive time as bag timestamp (standard rosbag2 behavior)
@@ -523,9 +530,14 @@ class EpisodeRecorderNode(LifecycleNode):
                         self._topic_msg_counts.get(_topic, 0) + 1
                     )
                 except Exception as e:
-                    self.get_logger().error(f'Write failed on {_topic}: {e}')
+                    self.get_logger().error(
+                        f'Write failed on {_topic}: type={type_str}, error={e}'
+                    )
                     self._stop_event.set()
 
+        self.get_logger().info(
+            f'Creating subscription for {topic}: type={type_str}, qos={qos}, buffering_strategy={buffering_strategy}'
+        )
         return self.create_subscription(msg_cls, topic, callback, qos, callback_group=self._cbg)
 
     # ---------- Action callbacks ----------
